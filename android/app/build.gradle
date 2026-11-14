@@ -34,9 +34,6 @@ if (appVersionCode > 2100000000) {
 android {
     namespace 'org.hytail.app'
     compileSdk 35
-    sourceSets {
-        main { assets.srcDirs += ['../../licenses'] }
-    }
     defaultConfig {
         applicationId 'org.hytail.app'
         minSdk 26

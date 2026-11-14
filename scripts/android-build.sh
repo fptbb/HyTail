@@ -162,9 +162,8 @@ build() {
   [[ -s "$source" ]] || fail "Gradle did not create $source"
   cp "$source" "$output"
   "$SDK/build-tools/35.0.0/apksigner" verify --verbose "$output"
-  # The unified local builder writes one SHA256SUMS for all dist artifacts.
-  # CI uploads the APK alone; the GitHub release job creates one global
-  # checksum manifest after assembling every platform archive.
+  # Local builds keep the APK in dist/. CI uploads this APK as a standalone
+  # artifact and publishes it beside the desktop binaries on tagged releases.
   rm -f "$output.sha256"
   echo "READY: $output (signed release APK)"
 }

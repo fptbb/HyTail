@@ -1,4 +1,4 @@
-name: Build HyTail
+name: Build and Release HyTail
 
 on:
   push:
@@ -22,6 +22,7 @@ jobs:
             runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             executable: hytail
+            release_name: HyTail-linux-x64
             upx_linux_arch: amd64
             upx_linux_sha256: 79cea8a50b6fa102d10c7b79a419cd77dead3cc2d78661de2dc5e5815dc505c1
           - os_name: linux
@@ -29,6 +30,7 @@ jobs:
             runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             executable: hytail
+            release_name: HyTail-linux-arm64
             upx_linux_arch: arm64
             upx_linux_sha256: 2a4afa860ac7aa6968f88df7841823746e5d00ba56affdf9342c2f5254fb776f
           - os_name: windows
@@ -36,11 +38,13 @@ jobs:
             runner: windows-2025
             target: x86_64-pc-windows-msvc
             executable: hytail.exe
+            release_name: HyTail-windows-x64.exe
           - os_name: windows
             arch: arm64
             runner: windows-11-arm
             target: aarch64-pc-windows-msvc
             executable: hytail.exe
+            release_name: HyTail-windows-arm64.exe
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -67,9 +71,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y pkg-config libx11-dev libxcursor-dev libxi-dev libxrandr-dev libxinerama-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libgl1-mesa-dev
 
-      # UPX 5.3.0 supports Windows ARM64 PE files, though its Windows binary
-      # is x64; Windows-on-ARM's x64 emulation runs it on the ARM64 runner.
-      # Packing is best effort: unsupported files retain their original bytes.
       - name: Install verified UPX 5.3.0 (Linux)
         if: matrix.os_name == 'linux'
         shell: bash
@@ -100,19 +101,14 @@ jobs:
           if (-not $upx) { throw 'UPX executable missing from release archive' }
           $upx.DirectoryName | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
 
-      # Go tests are OS-sensitive (especially Winsock handling), but not
-      # architecture-sensitive. Run once on x64 per OS, not in all four builds.
+      # OS-specific socket tests run once per OS. The ARM64 builds still compile
+      # the helper for their actual target as part of the release build.
       - name: Test Tailcat UDP helper
         if: matrix.arch == 'x64'
         working-directory: go-helper
         shell: bash
-        # Match the local test command. Windows selects additional Tailnet
-        # dependencies (Wintun, winipcfg, go-winio, etc.) that Linux never
-        # imports; -mod=mod lets Go add their required go.sum entries.
         run: go test -mod=mod ./...
 
-      # Rust unit tests do not launch the embedded helper. Skip its Go build
-      # in the test profile; release builds compile the real helper per target.
       - name: Rust unit tests
         if: matrix.arch == 'x64'
         shell: bash
@@ -139,48 +135,129 @@ jobs:
             mv -f "$binary.original" "$binary"
           fi
 
-      - name: Package release files
+      - name: Stage standalone release binary
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p dist
-          # Keep per-platform CI artifacts minimal: one executable only.
-          # Documentation, Nix helpers and legal notices already live in the
-          # source repository; the application embeds the notices it needs.
-          cp "target/${{ matrix.target }}/release/${{ matrix.executable }}" "dist/${{ matrix.executable }}"
+          cp "target/${{ matrix.target }}/release/${{ matrix.executable }}" "dist/${{ matrix.release_name }}"
 
       - uses: actions/upload-artifact@v4
         with:
           name: hytail-${{ matrix.os_name }}-${{ matrix.arch }}
-          path: dist/
+          path: dist/${{ matrix.release_name }}
           if-no-files-found: error
-          compression-level: 6
+          compression-level: 0
+
+  android:
+    name: android-arm64
+    # APK builds are expensive; run them for releases and explicit manual builds,
+    # not on every desktop-only commit or pull request.
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install project Go toolchain
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go-helper/go.mod
+          cache: true
+          cache-dependency-path: go-helper/go.mod
+
+      - name: Cache Android build tools and Gradle dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.local/share/hytail/gradle-8.11.1
+            ~/.gradle/caches
+            ~/.gradle/notifications
+            ~/go/bin
+          key: android-${{ runner.os }}-${{ hashFiles('scripts/android-build.sh', 'android/*.gradle', 'android/**/*.gradle', 'android/gradle.properties', 'go-helper/go.mod') }}
+
+      - name: Use persistent Android signing key when configured
+        shell: bash
+        env:
+          KEYSTORE_B64: ${{ secrets.HYTAIL_ANDROID_KEYSTORE_B64 || secrets.HYTAILSCALE_ANDROID_KEYSTORE_B64 }}
+          STORE_PASSWORD: ${{ secrets.HYTAIL_ANDROID_STORE_PASSWORD || secrets.HYTAILSCALE_ANDROID_STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.HYTAIL_ANDROID_KEY_PASSWORD || secrets.HYTAILSCALE_ANDROID_KEY_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.HYTAIL_ANDROID_KEY_ALIAS || secrets.HYTAILSCALE_ANDROID_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$KEYSTORE_B64" ]]; then
+            [[ -n "$STORE_PASSWORD" && -n "$KEY_PASSWORD" && -n "$KEY_ALIAS" ]] || { echo 'Incomplete Android signing secrets.' >&2; exit 1; }
+            mkdir -p "$RUNNER_TEMP/hytail-signing"
+            printf '%s' "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/hytail-signing/release.jks"
+            chmod 600 "$RUNNER_TEMP/hytail-signing/release.jks"
+            {
+              echo "HYTAIL_ANDROID_KEYSTORE=$RUNNER_TEMP/hytail-signing/release.jks"
+              echo "HYTAIL_ANDROID_STORE_PASSWORD=$STORE_PASSWORD"
+              echo "HYTAIL_ANDROID_KEY_PASSWORD=$KEY_PASSWORD"
+              echo "HYTAIL_ANDROID_KEY_ALIAS=$KEY_ALIAS"
+            } >> "$GITHUB_ENV"
+          else
+            echo 'WARNING: No persistent signing key configured; this APK uses a temporary CI signing identity and cannot update APKs signed with another key.'
+          fi
+
+      - name: Install Android tools and build signed release APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/android-build.sh setup
+          bash scripts/android-build.sh apk
+          test -s dist/HyTail-android-arm64-release.apk
+
+      - name: Upload Android release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: hytail-android-arm64
+          path: dist/HyTail-android-arm64-release.apk
+          if-no-files-found: error
+          compression-level: 0
 
   release:
+    name: Publish GitHub Release
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [build, android]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - name: Download all platform binaries and APK
+        uses: actions/download-artifact@v4
         with:
           pattern: hytail-*
-          path: artifacts
-      - name: Create per-platform archives
+          path: release
+          merge-multiple: true
+
+      - name: Verify release payload and generate one checksum manifest
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p release
-          for dir in artifacts/hytail-*; do
-            name=$(basename "$dir")
-            (cd "$dir" && zip -q -r "../../release/${name}.zip" .)
-          done
-          # Publish exactly one checksum manifest for the complete release.
-          # Individual build artifacts and platform archives carry no
-          # duplicate checksum files.
-          (cd release && sha256sum ./*.zip > SHA256SUMS)
-      - uses: softprops/action-gh-release@v2
+          test -s release/HyTail-linux-x64
+          test -s release/HyTail-linux-arm64
+          test -s release/HyTail-windows-x64.exe
+          test -s release/HyTail-windows-arm64.exe
+          test -s release/HyTail-android-arm64-release.apk
+          cd release
+          sha256sum \
+            HyTail-linux-x64 \
+            HyTail-linux-arm64 \
+            HyTail-windows-x64.exe \
+            HyTail-windows-arm64.exe \
+            HyTail-android-arm64-release.apk > SHA256SUMS
+          echo 'Release payload:'
+          ls -lh
+
+      - name: Publish binaries and APK directly
+        uses: softprops/action-gh-release@v2
         with:
-          files: release/*.zip
+          files: |
+            release/HyTail-linux-x64
+            release/HyTail-linux-arm64
+            release/HyTail-windows-x64.exe
+            release/HyTail-windows-arm64.exe
+            release/HyTail-android-arm64-release.apk
+            release/SHA256SUMS
           generate_release_notes: true
