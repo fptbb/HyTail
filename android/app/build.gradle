@@ -1,0 +1,74 @@
+plugins { id 'com.android.application' }
+
+// Cargo.toml is the single source of truth for the HyTail application version.
+// Android's integer versionCode is derived from MAJOR.MINOR.PATCH as
+// MAJOR * 1,000,000 + MINOR * 1,000 + PATCH.
+def cargoToml = rootProject.file('../Cargo.toml')
+if (!cargoToml.isFile()) {
+    throw new GradleException("Cannot find application version source: ${cargoToml}")
+}
+def packageSection = cargoToml.getText('UTF-8') =~ /(?ms)^\[package\]\s*(.*?)(?=^\[|\z)/
+if (!packageSection.find()) {
+    throw new GradleException("Cargo.toml has no [package] section: ${cargoToml}")
+}
+def versionMatcher = packageSection.group(1) =~ /(?m)^\s*version\s*=\s*"([^"]+)"/
+if (!versionMatcher.find()) {
+    throw new GradleException("Cargo.toml [package] has no version field: ${cargoToml}")
+}
+def appVersion = versionMatcher.group(1)
+def semver = appVersion =~ /^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/
+if (!semver.matches()) {
+    throw new GradleException("HyTail version must be MAJOR.MINOR.PATCH: ${appVersion}")
+}
+def versionMajor = semver[0][1].toInteger()
+def versionMinor = semver[0][2].toInteger()
+def versionPatch = semver[0][3].toInteger()
+if (versionMinor >= 1000 || versionPatch >= 1000) {
+    throw new GradleException("Android versionCode mapping requires MINOR and PATCH below 1000: ${appVersion}")
+}
+def appVersionCode = versionMajor * 1000000 + versionMinor * 1000 + versionPatch
+if (appVersionCode > 2100000000) {
+    throw new GradleException("Derived Android versionCode exceeds the Play Store limit: ${appVersionCode}")
+}
+
+android {
+    namespace 'org.hytail.app'
+    compileSdk 35
+    sourceSets {
+        main { assets.srcDirs += ['../../licenses'] }
+    }
+    defaultConfig {
+        applicationId 'org.hytail.app'
+        minSdk 26
+        targetSdk 35
+        versionCode appVersionCode
+        versionName appVersion
+        ndk { abiFilters 'arm64-v8a' }
+    }
+    // Keystore credentials come from the build environment, never from source control.
+    signingConfigs {
+        release {
+            def keystore = System.getenv('HYTAIL_ANDROID_KEYSTORE') ?: System.getenv('HYTAILSCALE_ANDROID_KEYSTORE')
+            def storePass = System.getenv('HYTAIL_ANDROID_STORE_PASSWORD') ?: System.getenv('HYTAILSCALE_ANDROID_STORE_PASSWORD')
+            def keyPass = System.getenv('HYTAIL_ANDROID_KEY_PASSWORD') ?: System.getenv('HYTAILSCALE_ANDROID_KEY_PASSWORD')
+            def keyAliasEnv = System.getenv('HYTAIL_ANDROID_KEY_ALIAS') ?: System.getenv('HYTAILSCALE_ANDROID_KEY_ALIAS')
+            if (keystore && storePass && keyPass && keyAliasEnv) {
+                storeFile = file(keystore)
+                storePassword = storePass
+                keyAlias = keyAliasEnv
+                keyPassword = keyPass
+            }
+        }
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.release
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+dependencies { implementation files('libs/hytail.aar') }

@@ -1,0 +1,51 @@
+[package]
+name = "hytail"
+version = "1.0.0"
+edition = "2024"
+build = "build.rs"
+description = "HyTail — private TCP/UDP bridges with Hytale, Minecraft, and Terraria presets"
+license = "MIT"
+publish = false
+autobins = false
+
+[[bin]]
+name = "hytail"
+path = "src/main.rs"
+
+[dependencies]
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+ctrlc = "3.4"
+
+# Keep glow on Linux/Windows x64 for small binaries. Use Direct3D12-capable
+# wgpu on Windows ARM64, where OpenGL 3.x drivers are not consistently available.
+[target.'cfg(target_os = "linux")'.dependencies]
+eframe = { version = "0.33", default-features = false, features = ["glow", "default_fonts", "wayland", "x11"] }
+# With eframe's default features disabled, winit also loses its Wayland
+# client-side titlebar fallback. KWin can still supply native server-side
+# decorations; this enables a functional frame when that is unavailable.
+winit = { version = "0.30.13", default-features = false, features = ["wayland-csd-adwaita"] }
+libloading = "0.8" # Runtime Wayland/X11 library probing for nonstandard Linux environments (e.g. NixOS)
+
+[target.'cfg(all(target_os = "windows", target_arch = "x86_64"))'.dependencies]
+eframe = { version = "0.33", default-features = false, features = ["glow", "default_fonts"] }
+
+[target.'cfg(all(target_os = "windows", target_arch = "aarch64"))'.dependencies]
+eframe = { version = "0.33", default-features = false, features = ["wgpu", "default_fonts"] }
+
+[build-dependencies]
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = "z"
+panic = "abort"
+strip = "symbols"
+
+[profile.dev]
+opt-level = 1

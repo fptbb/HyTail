@@ -1,0 +1,10 @@
+<resources>
+    <style name="Theme.HyTail" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:colorAccent">#74C7EC</item>
+        <item name="android:statusBarColor">#11111B</item>
+        <item name="android:navigationBarColor">#11111B</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowBackground">#1E1E2E</item>
+    </style>
+</resources>

@@ -1,0 +1,38 @@
+# Build outputs, intermediate artifacts
+/target/
+/dist/
+/android/build/
+/android/app/build/
+/android/.gradle/
+/android/.cxx/
+/android/.kotlin/
+/.android-build/
+/.zig-cache/
+/zig-out/
+
+# Generated Android native binding and local SDK configuration
+/android/app/libs/*.aar
+/android/local.properties
+
+# Android release signing material (never commit keys or passwords)
+*.jks
+*.keystore
+*.p12
+*.pfx
+**/signing.env
+**/keystore.properties
+
+# Editor/system/transient files
+/.idea/
+/android/.idea/
+/.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+__pycache__/
+*.py[cod]
+*.log
+
+# Generated install packages outside dist/
+*.apk

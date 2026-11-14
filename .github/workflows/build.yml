@@ -1,0 +1,186 @@
+name: Build HyTail
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.os_name }}-${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os_name: linux
+            arch: x64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            executable: hytail
+            upx_linux_arch: amd64
+            upx_linux_sha256: 79cea8a50b6fa102d10c7b79a419cd77dead3cc2d78661de2dc5e5815dc505c1
+          - os_name: linux
+            arch: arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            executable: hytail
+            upx_linux_arch: arm64
+            upx_linux_sha256: 2a4afa860ac7aa6968f88df7841823746e5d00ba56affdf9342c2f5254fb776f
+          - os_name: windows
+            arch: x64
+            runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            executable: hytail.exe
+          - os_name: windows
+            arch: arm64
+            runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            executable: hytail.exe
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Go (for restricted Tailcat helper)
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go-helper/go.mod
+          cache: true
+          cache-dependency-path: go-helper/go.mod
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Linux GUI development libraries
+        if: matrix.os_name == 'linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libx11-dev libxcursor-dev libxi-dev libxrandr-dev libxinerama-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libgl1-mesa-dev
+
+      # UPX 5.3.0 supports Windows ARM64 PE files, though its Windows binary
+      # is x64; Windows-on-ARM's x64 emulation runs it on the ARM64 runner.
+      # Packing is best effort: unsupported files retain their original bytes.
+      - name: Install verified UPX 5.3.0 (Linux)
+        if: matrix.os_name == 'linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          file="upx-5.3.0-${{ matrix.upx_linux_arch }}_linux.tar.xz"
+          curl -fsSL --retry 3 "https://github.com/upx/upx/releases/download/v5.3.0/${file}" -o "$file"
+          printf '%s  %s\n' '${{ matrix.upx_linux_sha256 }}' "$file" | sha256sum -c -
+          tar -xJf "$file"
+          mkdir -p "$RUNNER_TEMP/upx-bin"
+          cp "upx-5.3.0-${{ matrix.upx_linux_arch }}_linux/upx" "$RUNNER_TEMP/upx-bin/upx"
+          echo "$RUNNER_TEMP/upx-bin" >> "$GITHUB_PATH"
+
+      - name: Install verified UPX 5.3.0 (Windows)
+        if: matrix.os_name == 'windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archive = Join-Path $env:RUNNER_TEMP 'upx.zip'
+          Invoke-WebRequest 'https://github.com/upx/upx/releases/download/v5.3.0/upx-5.3.0-win64.zip' -OutFile $archive
+          $actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne 'd127996c76615e431be810e9c8d2910dbe3dd400600c5c0c50276fc5a17a9705') {
+            throw 'UPX release checksum mismatch'
+          }
+          $directory = Join-Path $env:RUNNER_TEMP 'upx-extracted'
+          Expand-Archive $archive -DestinationPath $directory
+          $upx = Get-ChildItem $directory -Recurse -Filter upx.exe | Select-Object -First 1
+          if (-not $upx) { throw 'UPX executable missing from release archive' }
+          $upx.DirectoryName | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+
+      # Go tests are OS-sensitive (especially Winsock handling), but not
+      # architecture-sensitive. Run once on x64 per OS, not in all four builds.
+      - name: Test Tailcat UDP helper
+        if: matrix.arch == 'x64'
+        working-directory: go-helper
+        shell: bash
+        # Match the local test command. Windows selects additional Tailnet
+        # dependencies (Wintun, winipcfg, go-winio, etc.) that Linux never
+        # imports; -mod=mod lets Go add their required go.sum entries.
+        run: go test -mod=mod ./...
+
+      # Rust unit tests do not launch the embedded helper. Skip its Go build
+      # in the test profile; release builds compile the real helper per target.
+      - name: Rust unit tests
+        if: matrix.arch == 'x64'
+        shell: bash
+        env:
+          HYTAIL_SKIP_EMBED_HELPER: "1"
+        run: bash scripts/private-cargo.sh test --target '${{ matrix.target }}'
+
+      - name: Build HyTail (embeds restricted Tailcat helper)
+        shell: bash
+        run: bash scripts/private-cargo.sh build --release --target '${{ matrix.target }}'
+
+      - name: UPX-pack single executable (verified, revert on failure)
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="target/${{ matrix.target }}/release/${{ matrix.executable }}"
+          test -f "$binary"
+          cp "$binary" "$binary.original"
+          if command -v upx >/dev/null 2>&1 && upx --best --lzma "$binary" && upx -t "$binary"; then
+            rm "$binary.original"
+            echo "UPX packed and verified: $binary"
+          else
+            echo "UPX unsupported or failed; restoring original: $binary"
+            mv -f "$binary.original" "$binary"
+          fi
+
+      - name: Package release files
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          # Keep per-platform CI artifacts minimal: one executable only.
+          # Documentation, Nix helpers and legal notices already live in the
+          # source repository; the application embeds the notices it needs.
+          cp "target/${{ matrix.target }}/release/${{ matrix.executable }}" "dist/${{ matrix.executable }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hytail-${{ matrix.os_name }}-${{ matrix.arch }}
+          path: dist/
+          if-no-files-found: error
+          compression-level: 6
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: hytail-*
+          path: artifacts
+      - name: Create per-platform archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          for dir in artifacts/hytail-*; do
+            name=$(basename "$dir")
+            (cd "$dir" && zip -q -r "../../release/${name}.zip" .)
+          done
+          # Publish exactly one checksum manifest for the complete release.
+          # Individual build artifacts and platform archives carry no
+          # duplicate checksum files.
+          (cd release && sha256sum ./*.zip > SHA256SUMS)
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/*.zip
+          generate_release_notes: true
